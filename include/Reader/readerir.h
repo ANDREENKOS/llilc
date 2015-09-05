@@ -1839,6 +1839,8 @@ private:
   /// \brief Map from llvm vector types for SIMD vector types
   /// to llvm struct type.
   std::map<llvm::Type *, llvm::Type *> VectorTypeToStructType;
+  llvm::Type * Vector3StructType;
+  llvm::Type * Vector3VectorType;
 };
 
 #endif // MSIL_READER_IR_H

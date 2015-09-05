@@ -453,6 +453,7 @@ void GenIR::readerPrePass(uint8_t *Buffer, uint32_t NumBytes) {
     const bool IsEnter = true;
     callMonitorHelper(IsEnter);
   }
+  Vector3StructType = Vector3VectorType = nullptr;
 
   if ((JitFlags & CORJIT_FLG_DEBUG_CODE) && !(JitFlags & CORJIT_FLG_IL_STUB)) {
     // Get the handle from the EE.
@@ -1484,7 +1485,9 @@ GenIR::getClassType(CORINFO_CLASS_HANDLE ClassHandle, bool GetAggregateFields,
         break;
       case '3':
         // Commented due to issue 822.
-        VectorResult = VectorType::get(FloatTy, 3);
+        // VectorResult = VectorType::get(FloatTy, 2);
+        Vector3StructType = Result;
+        Vector3VectorType = VectorType::get(FloatTy, 3);
         break;
       case '4':
         VectorResult = VectorType::get(FloatTy, 4);
@@ -4016,6 +4019,13 @@ void GenIR::storeAtAddressNoBarrierNonNull(IRNode *Address,
                                            bool IsVolatile) {
   StructType *StructTy = dyn_cast<StructType>(Ty);
   if (StructTy != nullptr) {
+    if (ValueToStore->getType()->isVectorTy()) {
+      // Vector3 case.
+      Type *PointerToVector = PointerType::get(ValueToStore->getType(), 0);
+      Address = (IRNode *)LLVMBuilder->CreatePointerCast(Address, PointerToVector);
+      makeStoreNonNull(ValueToStore, Address, IsVolatile);
+      return;
+    }
     assert(ValueToStore->getType()->isPointerTy() &&
            (ValueToStore->getType()->getPointerElementType() == Ty));
     assert(doesValueRepresentStruct(ValueToStore));
@@ -4197,9 +4207,15 @@ LoadInst *GenIR::makeLoad(Value *Address, bool IsVolatile,
       // to generate.
     }
   }
-  if (Address->getType()->isPointerTy() &&
-      Address->getType()->getPointerElementType()->isVectorTy()) {
-    return LLVMBuilder->CreateAlignedLoad(Address, 1, IsVolatile);
+  if (Address->getType()->isPointerTy()) {
+    Type *ElementType = Address->getType()->getPointerElementType();
+    if (ElementType == Vector3StructType) {
+      Type *PointerToVector = PointerType::get(Vector3VectorType, 0);
+      Address = LLVMBuilder->CreatePointerCast(Address, PointerToVector);
+    }
+    if (ElementType->isVectorTy()) {
+      return LLVMBuilder->CreateAlignedLoad(Address, 1, IsVolatile);
+    }    
   }
   return LLVMBuilder->CreateLoad(Address, IsVolatile);
 }
@@ -6967,7 +6983,7 @@ IRNode *GenIR::loadNonPrimitiveObj(IRNode *Addr,
   IRNode *TypedAddr =
       getTypedAddress(Addr, CorType, ClassHandle, Alignment, &Align);
   Type *Type = getType(CorType, ClassHandle);
-  if (Type->isVectorTy()) {
+  if (Type->isVectorTy() || Type == Vector3StructType) {
     return (IRNode *)makeLoad(Addr, IsVolatile, AddressMayBeNull);
   }
   StructType *StructTy = cast<StructType>(Type);
@@ -6987,7 +7003,9 @@ IRNode *GenIR::loadNonPrimitiveObj(StructType *StructTy, IRNode *Address,
       // to generate.
     }
   }
-
+  if (StructTy == Vector3StructType) {
+    return (IRNode *)makeLoad(Address, IsVolatile, AddressMayBeNull);
+  }
   IRNode *Copy = (IRNode *)createTemporary(StructTy);
   copyStruct(cast<StructType>(StructTy), Copy, Address, IsVolatile, Alignment);
   setValueRepresentsStruct(Copy);
@@ -8243,7 +8261,6 @@ bool GenIR::checkVectorSignature(std::vector<IRNode *> Args,
   for (unsigned int Counter = 0; Counter < Args.size(); ++Counter) {
     assert(Args[Counter]);
     if (Args[Counter]->getType() != Types[Counter]) {
-      assert(UNREACHED);
       return 0;
     }
   }
@@ -8350,6 +8367,10 @@ IRNode *GenIR::vectorCtor(CORINFO_CLASS_HANDLE Class, IRNode *This,
   Type *ElementType =
       getBaseTypeAndSizeOfSIMDType(Class, VectorSize, IsGeneric, IsSigned);
   if (VectorSize == 0) { // For example Vector<bool>.
+    return 0;
+  }
+  if (VectorSize == 3) { 
+    // Issue 822. Don't support ctor as intrinsic for Vector3.
     return 0;
   }
   Type *VectorType = llvm::VectorType::get(ElementType, VectorSize);
@@ -8493,7 +8514,6 @@ llvm::Type *GenIR::getBaseTypeAndSizeOfSIMDType(CORINFO_CLASS_HANDLE Class,
   CORINFO_CLASS_HANDLE SIMDVector2Handle = 0;
   CORINFO_CLASS_HANDLE SIMDVector3Handle = 0;
   CORINFO_CLASS_HANDLE SIMDVector4Handle = 0;
-  CORINFO_CLASS_HANDLE SIMDVectorHandle = 0;
 
   LLVMContext &Context = *JitContext->LLVMContext;
 
